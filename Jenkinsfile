@@ -1,33 +1,16 @@
-// Jenkinsfile (v02 최적화 반영본)
+// Jenkinsfile (v06)
 pipeline {
   agent any
 
   options {
-    // 플러그인 의존 옵션은 환경에 따라 파싱 실패할 수 있어 기본 비활성 권장
-    // timestamps()
-    // ansiColor('xterm')
     buildDiscarder(logRotator(numToKeepStr: '30'))
   }
 
   environment {
-    // AST 결과를 서버에 영구 저장할 경로 (Jenkins 실행 계정이 쓰기 권한을 가져야 함)
     AST_STORE = "/var/lib/jenkins/ast/chibios-os-rt"
-
-    // 사용 도구
     CLANG = "clang"
     PY = "python3"
-
-    // ⚠️ 실제 ChibiOS RT 빌드에 맞게 조정 필요 (compile_commands.json 생성 목적)
-    // (incremental은 필요할 때만 켜는 게 좋음)
     BUILD_CMD = "make -C testrt"
-
-    // ==========================================================
-    // [baseline에서 build-cmd 기본 비활성]
-    // - baseline은 처음 1회 전체 TU를 다 도는 구간이라 시간이 길어짐
-    // - bear + make가 더 오래 걸릴 수 있어서 기본은 ""(비활성)
-    // - 필요하면 아래 값을 BUILD_CMD와 같게 바꿔서 켜면 됨
-    //   예: BUILD_CMD_BASELINE = "make -C testrt"
-    // ==========================================================
     BUILD_CMD_BASELINE = ""
   }
 
@@ -69,10 +52,6 @@ pipeline {
 
           def baselineExists = fileExists("${env.AST_STORE}/baseline/summary.json")
 
-          // ==========================================================
-          // [변경 사항 감지]
-          // - origin/main..HEAD 범위에서 os/rt/** 변경이 있는지 확인
-          // ==========================================================
           sh "git fetch origin main:refs/remotes/origin/main || true"
           def changed = sh(
             script: "git diff --name-only origin/main..HEAD | grep '^os/rt/' || true",
@@ -132,7 +111,6 @@ pipeline {
       options { timeout(time: 25, unit: 'MINUTES') }
 
       steps {
-        // ✅ 여기만 bash로 강제해서 pipefail 사용 가능하게 함
         sh '''
           bash -lc '
           set -euo pipefail
@@ -166,7 +144,8 @@ pipeline {
 
             echo "[BASELINE] 전체 TU AST 생성 시작"
 
-            BASELINE_BUILD_CMD="${BUILD_CMD_BASELINE}"
+            # ✅ 수정 포인트: BUILD_CMD_BASELINE이 없더라도 nounset(-u)에서 죽지 않게 기본값 처리
+            BASELINE_BUILD_CMD="${BUILD_CMD_BASELINE:-}"
 
             ${PY} tools/ast_ci/ast_build_and_diff.py \
               --outdir "$OUT" \
