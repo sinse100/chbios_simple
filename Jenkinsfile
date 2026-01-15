@@ -1,4 +1,4 @@
-// Jenkinsfile (v07 - ast_build_and_diff.py 누락 오류 수정)
+// Jenkinsfile (v08 - *.ast.json 생성 반영)
 pipeline {
   agent any
 
@@ -50,10 +50,8 @@ pipeline {
         script {
           sh "mkdir -p '${env.AST_STORE}/baseline'"
 
-          // 최초 실행(또는 baseline/summary.json 없음)인지 확인
           def baselineExists = fileExists("${env.AST_STORE}/baseline/summary.json")
 
-          // origin/main..HEAD 범위에서 os/rt/** 변경 감지
           sh "git fetch origin main:refs/remotes/origin/main || true"
           def changed = sh(
             script: "git diff --name-only origin/main..HEAD | grep '^os/rt/' || true",
@@ -103,13 +101,6 @@ pipeline {
         sh '''
           set -eux
           mkdir -p tools/ast_ci
-
-          # ==========================================================
-          # [중요] 이전 실패 원인 해결:
-          # - tools/ast_ci/ast_build_and_diff.py 파일이 실제로 생성되지 않아
-          #   다음 단계에서 python3가 파일을 못 찾아서 실패했음
-          # - 여기서 스크립트를 "항상" 생성하도록 함
-          # ==========================================================
 
           cat > tools/ast_ci/ast_build_and_diff.py << 'PY'
 #!/usr/bin/env python3
@@ -262,7 +253,12 @@ def main():
         after  = out / f"{rel}.after.c"
         diffp  = out / f"{rel}.diff.json"
 
+        # ✅ 추가: AST 덤프 파일 생성 (사용자가 찾는 *.ast.json)
+        ast_before_p = out / f"{rel}.before.ast.json"
+        ast_after_p  = out / f"{rel}.after.ast.json"
+
         ensure_parent(before); ensure_parent(after); ensure_parent(diffp)
+        ensure_parent(ast_before_p); ensure_parent(ast_after_p)
 
         before.write_text(run(["git","show",f"{base_commit}:{rel}"], check=False), encoding="utf-8", errors="ignore")
         after.write_text(run(["git","show",f"{head_commit}:{rel}"], check=False), encoding="utf-8", errors="ignore")
@@ -272,6 +268,10 @@ def main():
 
         ast_b = clang_ast(args.clang, str(before), flags)
         ast_a = clang_ast(args.clang, str(after),  flags)
+
+        # ✅ 추가: AST JSON 저장
+        ast_before_p.write_text(json.dumps(ast_b, indent=2), encoding="utf-8")
+        ast_after_p.write_text(json.dumps(ast_a, indent=2), encoding="utf-8")
 
         diff = diff_functions(ast_b, ast_a)
         diffp.write_text(json.dumps(diff, indent=2), encoding="utf-8")
