@@ -73,9 +73,9 @@ pipeline {
           // [변경 사항 감지]
           // - origin/main..HEAD 범위에서 os/rt/** 변경이 있는지 확인
           // ==========================================================
-          sh "git fetch origin main:refs/remotes/origin/main || true"     // ★ 변경
+          sh "git fetch origin main:refs/remotes/origin/main || true"
           def changed = sh(
-            script: "git diff --name-only origin/main..HEAD | grep '^os/rt/' || true",  // ★ 변경
+            script: "git diff --name-only origin/main..HEAD | grep '^os/rt/' || true",
             returnStdout: true
           ).trim()
 
@@ -132,19 +132,120 @@ pipeline {
       options { timeout(time: 25, unit: 'MINUTES') }
 
       steps {
+        // ✅ 여기만 bash로 강제해서 pipefail 사용 가능하게 함
         sh '''
+          bash -lc '
           set -euo pipefail
-          # (중략 – 내용 변경 없음)
 
+          COMMIT=$(git rev-parse --short HEAD)
+          AST_ROOT="${AST_STORE}"
+          BASELINE_DIR="${AST_ROOT}/baseline"
+
+          mkdir -p "${AST_ROOT}"
+          mkdir -p "ast_out"
+
+          TS=$(date +%Y%m%d_%H%M%S)
+          TMP_BASE="${AST_ROOT}/.tmp_baseline_${COMMIT}_${TS}"
+          TMP_COMMIT="${AST_ROOT}/.tmp_commit_${COMMIT}_${TS}"
+
+          rollback() {
+            echo "[ROLLBACK] 빌드 실패 감지 → 임시 결과물 정리 및(필요 시) baseline 복구"
+            rm -rf "${TMP_BASE}" "${TMP_COMMIT}" || true
+
+            if [ -n "${BASELINE_BACKUP:-}" ] && [ -d "${BASELINE_BACKUP}" ]; then
+              echo "[ROLLBACK] baseline 복구 수행: ${BASELINE_BACKUP} → ${BASELINE_DIR}"
+              rm -rf "${BASELINE_DIR}" || true
+              mv "${BASELINE_BACKUP}" "${BASELINE_DIR}" || true
+            fi
+          }
+          trap rollback ERR
+
+          if [ "${AST_MODE}" = "baseline" ]; then
+            OUT="ast_out/baseline_${COMMIT}"
+            mkdir -p "$OUT"
+
+            echo "[BASELINE] 전체 TU AST 생성 시작"
+
+            BASELINE_BUILD_CMD="${BUILD_CMD_BASELINE}"
+
+            ${PY} tools/ast_ci/ast_build_and_diff.py \
+              --outdir "$OUT" \
+              --base "HEAD" \
+              --head "HEAD" \
+              --mode "baseline" \
+              --build-cmd "${BASELINE_BUILD_CMD}"
+
+            mkdir -p "${TMP_BASE}"
+            rsync -a --delete "$OUT/" "${TMP_BASE}/"
+
+            if [ -d "${BASELINE_DIR}" ] && [ "$(ls -A "${BASELINE_DIR}" 2>/dev/null || true)" != "" ]; then
+              BASELINE_BACKUP="${AST_ROOT}/.backup_baseline_${TS}"
+              echo "[BASELINE] 기존 baseline 백업: ${BASELINE_DIR} → ${BASELINE_BACKUP}"
+              mv "${BASELINE_DIR}" "${BASELINE_BACKUP}"
+            fi
+
+            echo "[BASELINE] baseline 원자적 교체: ${TMP_BASE} → ${BASELINE_DIR}"
+            rm -rf "${BASELINE_DIR}" || true
+            mv "${TMP_BASE}" "${BASELINE_DIR}"
+
+            if [ -n "${BASELINE_BACKUP:-}" ] && [ -d "${BASELINE_BACKUP}" ]; then
+              echo "[BASELINE] 교체 성공 → 이전 baseline 백업 정리: ${BASELINE_BACKUP}"
+              rm -rf "${BASELINE_BACKUP}"
+            fi
+
+            echo "[BASELINE] 완료: ${BASELINE_DIR}/summary.json 생성 여부 확인"
+            ls -la "${BASELINE_DIR}" || true
+
+          else
+            BASE_COMMIT=""
+            if [ -f "${BASELINE_DIR}/summary.json" ]; then
+              BASE_COMMIT=$(jq -r ".head_commit // .headCommit // empty" "${BASELINE_DIR}/summary.json" || true)
+            fi
             if [ -z "${BASE_COMMIT}" ] || [ "${BASE_COMMIT}" = "null" ]; then
-              echo "[INCREMENTAL] baseline 기준 커밋을 못 읽음 → origin/main 사용"  # ★ 변경
-              BASE_REF="origin/main"                                                  # ★ 변경
+              echo "[INCREMENTAL] baseline 기준 커밋을 못 읽음 → origin/main 사용"
+              BASE_REF="origin/main"
             else
               BASE_REF="${BASE_COMMIT}"
               echo "[INCREMENTAL] baseline 기준 커밋: ${BASE_REF}"
             fi
 
-          # (이하 변경 없음)
+            OUT="ast_out/${COMMIT}"
+            mkdir -p "$OUT"
+
+            echo "[INCREMENTAL] 변경 TU AST 생성 + diff 시작"
+            ${PY} tools/ast_ci/ast_build_and_diff.py \
+              --outdir "$OUT" \
+              --base "${BASE_REF}" \
+              --head "HEAD" \
+              --mode "incremental" \
+              --build-cmd "${BUILD_CMD}"
+
+            mkdir -p "${TMP_COMMIT}"
+            rsync -a --delete "$OUT/" "${TMP_COMMIT}/"
+
+            FINAL_COMMIT_DIR="${AST_ROOT}/${COMMIT}"
+
+            if [ -d "${FINAL_COMMIT_DIR}" ] && [ "$(ls -A "${FINAL_COMMIT_DIR}" 2>/dev/null || true)" != "" ]; then
+              COMMIT_BACKUP="${AST_ROOT}/.backup_commit_${COMMIT}_${TS}"
+              echo "[INCREMENTAL] 기존 커밋 결과 백업: ${FINAL_COMMIT_DIR} → ${COMMIT_BACKUP}"
+              mv "${FINAL_COMMIT_DIR}" "${COMMIT_BACKUP}"
+            fi
+
+            echo "[INCREMENTAL] 커밋 결과 원자적 교체: ${TMP_COMMIT} → ${FINAL_COMMIT_DIR}"
+            rm -rf "${FINAL_COMMIT_DIR}" || true
+            mv "${TMP_COMMIT}" "${FINAL_COMMIT_DIR}"
+
+            if [ -n "${COMMIT_BACKUP:-}" ] && [ -d "${COMMIT_BACKUP}" ]; then
+              echo "[INCREMENTAL] 교체 성공 → 이전 커밋 결과 백업 정리: ${COMMIT_BACKUP}"
+              rm -rf "${COMMIT_BACKUP}"
+            fi
+
+            echo "[INCREMENTAL] 완료: ${FINAL_COMMIT_DIR}/summary.json 확인"
+            ls -la "${FINAL_COMMIT_DIR}" || true
+          fi
+
+          trap - ERR
+          '
         '''
       }
     }
